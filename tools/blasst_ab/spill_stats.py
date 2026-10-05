@@ -6,7 +6,7 @@ move, and a timing table alone cannot distinguish "the patch helped" from "this
 machine was quieter during the second run".
 
 It is NOT the mechanism behind the measured win, despite an earlier version of
-this file saying so: on the real FA kernel the patch is worth ~1.097x with
+this file saying so: on the real FA kernel the patch is worth ~1.09x with
 vgpr_spill_count at 0 on both arms. Spilling amplifies the effect where it
 occurs; it is not required for it.
 
