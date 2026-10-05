@@ -1,0 +1,66 @@
+# Arm B: the SAME Triton build as Dockerfile.stock, plus the chain-dot patch.
+#
+# DERIVED, NOT PARALLEL. This is `FROM` the stock image rather than a second
+# from-scratch build. Two reasons, and the first is the important one:
+#
+#   1. "The only difference between the arms is this patch" stops being a claim
+#      and becomes a property of the image graph. Same base layer, same ROCm,
+#      same torch, same Triton checkout, same compiler flags -- by construction,
+#      not by two Dockerfiles being kept in sync by hand.
+#   2. The cmake build tree survives in the stock image, so applying the patch
+#      recompiles one .cpp and relinks the AMD backend. Minutes, not a second
+#      full build.
+#
+# If the incremental rebuild ever stops taking (a Triton build-system change
+# could do it), the symptom is this layer taking ~10 minutes instead of ~2. That
+# is slow, not wrong -- the RUN below verifies the patch is actually in the
+# rebuilt binary either way.
+ARG STOCK_IMAGE=triton-blasst-ab:stock
+FROM ${STOCK_IMAGE}
+
+# The change under test, identical to the PR diff. patch-base.txt records the
+# commit it was cut from, and build.sh refuses to proceed if that disagrees with
+# the commit pinned above -- a patch cut against one base must never be built on
+# top of another.
+COPY 0001-force-chain-dot-across-scf-if.patch /opt/0001-force-chain-dot-across-scf-if.patch
+
+# `git apply` with no fuzz on purpose. If the patch does not apply exactly, the
+# base commit is not what we think it is and the build must stop.
+# NOTE: no `time` here. RUN executes under /bin/sh (dash), where `time` is
+# neither a builtin nor installed, and the layer dies with exit 127 after the
+# patch has already applied -- which reads like a patch failure and is not one.
+# The arithmetic below is portable and answers the same question: this layer
+# should take ~2 min. If it takes ~10, the incremental rebuild stopped working
+# and every later build is paying for a full one.
+RUN cd /opt/triton-src \
+    && git apply --verbose /opt/0001-force-chain-dot-across-scf-if.patch \
+    && printf '%s\n' "$(git rev-parse HEAD)" \
+         "patched: 0001-force-chain-dot-across-scf-if.patch" \
+         > /opt/triton-src-commit.txt \
+    && _t0=$(date +%s) \
+    && pip install --no-cache-dir -e . --no-build-isolation \
+    && echo "rebuild with patch took $(( $(date +%s) - _t0 ))s (expect ~120s incremental, ~600s full)" \
+    && python3 -c "import triton; print('Triton rebuilt with patch:', triton.__version__)" \
+    && python3 -c "import torch; assert torch.version.hip is not None, 'lost ROCm torch build'; print('torch (ROCm):', torch.__version__)"
+
+# The mirror of the stock image's assertion. Checking the SOURCE only proves the
+# patch applied; what matters is that it reached the binary the benchmark will
+# load. An incremental rebuild that silently no-ops would pass a source check and
+# produce two identical arms.
+# `grep -a` rather than `strings`: binutils is not guaranteed in this base image,
+# and a missing tool here would fail the build in a way that looks like a missing
+# patch. Searching every .so rather than guessing libtriton.so keeps this working
+# if Triton renames or relocates the extension module.
+RUN grep -q "isSameOrAcrossOneIfLevel" /opt/triton-src/third_party/amd/lib/TritonAMDGPUToLLVM/Utility.cpp \
+    && echo "verified: patch present in source" \
+    && HIT=$(find /opt/triton-src -name '*.so' -exec grep -aq "TRITON_HIP_FORCE_CHAIN_DOT_ACROSS_IF" {} \; -print | head -1) \
+    && if [ -z "$HIT" ]; then \
+         echo "FATAL: patch applied to source, but TRITON_HIP_FORCE_CHAIN_DOT_ACROSS_IF" >&2; \
+         echo "       appears in no built .so under /opt/triton-src." >&2; \
+         echo "       The rebuild did not pick up the patch; the two arms would be" >&2; \
+         echo "       the same build and every number from them meaningless." >&2; \
+         exit 1; \
+       fi \
+    && echo "verified: patch present in the built binary ($HIT)"
+
+WORKDIR /workspace

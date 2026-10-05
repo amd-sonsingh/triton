@@ -1,0 +1,63 @@
+# Arm A: UNMODIFIED upstream Triton at the commit our PR targets.
+#
+# This is the baseline the PR's headline number is measured against. It contains
+# no patch of any kind -- not the patch disabled, not the patch inert, absent.
+#
+# WHY NOT ONE IMAGE WITH THE ENV VAR TOGGLED. The patch is opt-in via
+# TRITON_HIP_FORCE_CHAIN_DOT_ACROSS_IF and returns false immediately when unset,
+# so a single patched image CAN produce both arms. But "patched build with the
+# patch switched off" is a claim a reader has to take on trust. Two images make
+# the baseline unarguable.
+#
+# WHY THE SOURCE IS BAKED IN RATHER THAN MOUNTED. This image exists to MEASURE,
+# so the compiler is pinned: running these instructions in six months must give
+# the same build.
+#
+# Pin the ROCm base too -- a number measured on one base and a number measured
+# on another differ by more than Triton. Do not bump it casually.
+FROM rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+
+ENV MAX_JOBS=16
+
+# The commit the PR is based on. Changing this invalidates every number measured
+# with this image, so it is an ARG with a default rather than a bare constant --
+# visible in `docker history`, overridable for a rebase check.
+ARG TRITON_COMMIT=b1c34b00c7f6a6819927577c00a98c0753c1709f
+
+# transformers/accelerate go in BEFORE the Triton swap below. torch's install
+# metadata pins an exact Triton version; installing anything after that pin is
+# broken lets pip's resolver silently re-resolve torch+triton to non-ROCm wheels,
+# and you end up benchmarking a CPU build.
+RUN pip install --no-cache-dir transformers accelerate \
+    && python3 -c "import torch; assert torch.version.hip is not None, 'lost ROCm torch build'; print('torch (ROCm):', torch.__version__)"
+
+# --no-build-isolation skips pyproject.toml's [build-system].requires, so those
+# must already be present. Pins are copied from pyproject.toml AT THIS COMMIT:
+#
+#   requires = ["setuptools>=40.8.0", "cmake>=3.20,<4.0", "ninja>=1.11.1", "nanobind==2.10.2"]
+#
+# The cmake upper bound is load-bearing: a bare `pip install cmake` now resolves
+# to 4.x and the build fails. nanobind must
+# match exactly; a mismatch surfaces as an unrelated-looking C++ template error
+# deep in the build.
+RUN pip uninstall -y triton pytorch-triton pytorch-triton-rocm triton-rocm amd-triton || true \
+    && pip install --no-cache-dir 'ninja>=1.11.1' 'cmake>=3.20,<4.0' 'nanobind==2.10.2'
+
+RUN git clone https://github.com/triton-lang/triton.git /opt/triton-src \
+    && cd /opt/triton-src \
+    && git checkout "${TRITON_COMMIT}" \
+    && printf '%s\n' "$(git rev-parse HEAD)" "patched: NONE (stock upstream)" \
+         > /opt/triton-src-commit.txt \
+    && pip install --no-cache-dir -e . --no-build-isolation \
+    && python3 -c "import triton; print('Triton built from source:', triton.__version__)" \
+    && python3 -c "import torch; assert torch.version.hip is not None, 'lost ROCm torch build after triton swap'; print('torch (ROCm, post-triton-swap):', torch.__version__)"
+
+# Assert the baseline is genuinely unpatched. If the helper ever shows up here,
+# the two arms are the same build and every number produced is worthless -- fail
+# at build time rather than let that reach a PR description.
+RUN if grep -rq "isSameOrAcrossOneIfLevel" /opt/triton-src/third_party/amd/lib/TritonAMDGPUToLLVM/Utility.cpp; then \
+      echo "FATAL: stock image contains the patch" >&2; exit 1; \
+    fi \
+    && echo "verified: stock image has no chain-dot patch"
+
+WORKDIR /workspace
