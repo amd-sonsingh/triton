@@ -1,0 +1,10 @@
+# The build context is this directory, but the images need exactly one file from
+# it: the patch. aiter is bind-mounted at RUN time, not baked in, so shipping its
+# ~40 MB tarball to the docker daemon on every build is pure latency.
+aiter-*.tar.gz
+aiter-commit.txt
+patch-base.txt
+results/
+*.log
+*.csv
+README.md
