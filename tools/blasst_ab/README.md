@@ -72,7 +72,7 @@ should return at least one hit.
 bash build.sh
 ```
 
-Two images, both from `triton-lang/triton@6c14a3d5e8`:
+Two images, both from `triton-lang/triton@b1c34b00c7`:
 
 | image | Triton |
 |---|---|
@@ -99,10 +99,10 @@ verified: patch present in the built binary (/opt/triton-src/python/triton/_C/li
 
 ```
 --- triton-blasst-ab:stock
-6c14a3d5e824fcab6e8c4f7ea137ccd839c87140
+b1c34b00c7f6a6819927577c00a98c0753c1709f
 patched: NONE (stock upstream)
 --- triton-blasst-ab:patched
-6c14a3d5e824fcab6e8c4f7ea137ccd839c87140
+b1c34b00c7f6a6819927577c00a98c0753c1709f
 patched: 0001-force-chain-dot-across-scf-if.patch
 ```
 
@@ -182,20 +182,22 @@ kernel_unified_attention_2d.ttgir   [4,1],[2,2],[2,2]    [4,1],[4,1],[4,1]   <--
 
 ```
 case                          lambda   elide  stock ms   patched  patch worth
-32q/8kv seqlen=16384           1e-09    0.0%     3.395     3.096      1.0968x
-32q/8kv seqlen=16384         0.02878    0.0%     3.389     3.101      1.0930x
-32q/8kv seqlen=16384             0.1    0.0%     3.365     3.042      1.1063x
-32q/8kv seqlen=16384             0.3    0.0%     3.362     3.050      1.1026x
-32q/8kv seqlen=16384             1.0   21.4%     2.946     2.682      1.0983x
-32q/8kv seqlen=16384             1.3   44.3%     2.539     2.329      1.0901x
-32q/8kv seqlen=16384             2.0   70.9%     2.095     1.924      1.0887x
+32q/8kv seqlen=16384           1e-09    0.0%     3.419     3.131      1.0920x
+32q/8kv seqlen=16384         0.02878    0.0%     3.414     3.137      1.0883x
+32q/8kv seqlen=16384             0.1    0.0%     3.370     3.075      1.0960x
+32q/8kv seqlen=16384             0.3    0.0%     3.359     3.069      1.0946x
+32q/8kv seqlen=16384             1.0   21.4%     2.952     2.708      1.0901x
+32q/8kv seqlen=16384             1.3   44.3%     2.552     2.351      1.0856x
+32q/8kv seqlen=16384             2.0   70.9%     2.094     1.931      1.0842x
 
-  no elision      : patch worth 1.0997x  (4 pts)
-  elision active  : patch worth 1.0924x  (3 pts)
+  no elision      : patch worth 1.0927x  (4 pts)
+  elision active  : patch worth 1.0866x  (3 pts)
 ```
 
-**PASS:** patch worth roughly **1.08–1.12×** on every row, and **near-constant** across the
-elision sweep.
+**PASS:** patch worth roughly **1.07–1.11×** on every row, and **near-constant** across the
+elision sweep. Across three full runs the means were 1.097×, 1.089× and 1.090× — expect
+**~1.09× with about ±0.01× run-to-run spread**, and do not read individual rows to three
+decimals.
 
 The flatness is the result, not an incidental detail. Warp layout is chosen at compile time,
 so the cost is paid because the conditional *exists*, not because it is taken. A figure that
@@ -211,7 +213,7 @@ prints a warning if the two buckets diverge by more than 0.05×.
 
 **PASS:** patched `rel_err` is exactly `0` on every 0%-elision row.
 
-Stock showing ~1e-5 there is expected, and is the layout difference surfacing in the output:
+Stock showing 1e-5 to 1e-4 there is expected, and is the layout difference surfacing:
 dense has no conditional so it keeps `[4,1]`, unpatched block-skip falls back to `[2,2]`,
 and two layouts reduce in different orders. A non-zero `rel_err` on the **patched** arm
 would be a real failure and `collate.py` exits non-zero for it.
@@ -275,7 +277,7 @@ patch switched off".
 
 | | |
 |---|---|
-| `Dockerfile.stock` | upstream Triton @ `6c14a3d5e8`, unpatched |
+| `Dockerfile.stock` | upstream Triton @ `b1c34b00c7`, unpatched |
 | `Dockerfile.patched` | `FROM` stock + the patch, incremental rebuild |
 | `0001-force-chain-dot-across-scf-if.patch` | the change under test, identical to the PR diff |
 | `patch-base.txt` | the commit the patch was cut from; `build.sh` refuses to proceed if it disagrees with the pinned commit |
