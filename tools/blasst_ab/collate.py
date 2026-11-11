@@ -43,22 +43,15 @@ def main(stock_path, patched_path):
               f"{float(s['ms']):9.3f} {float(p['ms']):9.3f} {worth:11.4f}x "
               f"{es:9.3g} {ep:9.3g}")
         graded.append((float(thr), el, worth))
-        # Nothing elided means nothing was skipped, so the output must match
-        # this arm's OWN dense reference. Check BOTH arms: an earlier version
-        # looked only at `patched` and silently missed that the stock arm drifts.
+        # Nothing elided, so compare each arm against its own dense reference.
         if el is not None and el < 1e-12:
             if ep != 0.0:
                 bad_patched.append((case, thr, ep))
             if es != 0.0:
                 drift_stock.append((case, thr, es))
 
-    # -----------------------------------------------------------------------
-    # Split on MEASURED elision, not on the threshold value.
-    #
-    # A low threshold can elide nothing at all, so bucketing by lambda files
-    # genuine overhead-floor points under "skipping active" and OVERSTATES the
-    # gap.
-    # -----------------------------------------------------------------------
+    # Split on measured elision, not the threshold: a low threshold can elide
+    # nothing at all.
     have_elide = all(e is not None for _, e, _ in graded)
     if have_elide:
         floor = [g for _, e, g in graded if e < 0.01]
@@ -80,9 +73,8 @@ def main(stock_path, patched_path):
         print(f"  elision active  : patch worth {sum(live)/len(live):.4f}x  "
               f"({len(live)} pts) -- the conditional dot is being taken")
 
-    # The patch is a compile-time layout decision, so its cost is incurred
-    # because the conditional EXISTS, not because it is taken. A large gap
-    # between the two buckets is therefore suspicious rather than encouraging.
+    # The layout is chosen at compile time, so the effect should not depend on
+    # how much is elided. A large gap between the buckets is suspicious.
     if floor and live:
         gap = abs(sum(live)/len(live) - sum(floor)/len(floor))
         if gap > 0.05:
@@ -92,18 +84,9 @@ def main(stock_path, patched_path):
                   "large gap suggests the\n        benchmark is also measuring "
                   "something else.")
 
-    # -----------------------------------------------------------------------
-    # The stock arm drifting from its own dense reference at 0% elision is NOT
-    # a bug, and it is not noise either -- it is the layout mismatch showing up
-    # in the output. Dense has no conditional, so it keeps warpsPerCTA=[4,1];
-    # unpatched block-skip falls back to [2,2]; two layouts means two reduction
-    # orders means a different bf16 rounding. Under the patch both are [4,1] and
-    # the outputs agree bit for bit.
-    #
-    # Worth reporting rather than hiding: "the patched kernel is numerically
-    # identical to dense when nothing is skipped, and the unpatched one is not"
-    # is a cleaner statement of what the patch does than any timing.
-    # -----------------------------------------------------------------------
+    # Stock drifting from dense at 0% elision is expected: dense keeps [4,1],
+    # unpatched block-skip falls back to [2,2], and the two reduce in different
+    # orders. With the patch both use [4,1] and match bit for bit.
     if drift_stock and not bad_patched:
         print("\n  stock drifts from its own dense output where nothing elided;")
         print("  patched matches dense EXACTLY on those same rows:")

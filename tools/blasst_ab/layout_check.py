@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Did the patch actually change the warp layout? Gate the timings on this.
 
-The whole experiment is an A/B on one compile-time decision. If both arms chose
-the same warpsPerCTA then the patch did not take effect, and whatever the
-timings say they are not saying it about this patch. This check exists because a
-run where the env var never reached the compiler produced perfectly plausible
-numbers that meant nothing.
-
-Reads TTGIR out of the per-arm TRITON_DUMP_DIR.
+If both arms chose the same warpsPerCTA, the patch had no effect and the
+timings do not measure it. Reads TTGIR out of the per-arm TRITON_DUMP_DIR.
 
     python3 layout_check.py dump_stock dump_patched
 """

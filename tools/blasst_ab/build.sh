@@ -1,14 +1,8 @@
 #!/bin/bash
-# Build both arms of the BLASST A/B: stock upstream Triton, and the same build
-# plus the chain-dot patch.
+# Build both arms: stock upstream Triton, and the same build plus the patch.
+# Needs Docker, not a GPU. ~15 min for stock, a few minutes for patched.
 #
-#   bash tools/blasst_ab/build.sh
-#
-# Run this ON A COMPUTE NODE (it needs docker, not a GPU -- compiling Triton is
-# CPU work -- the benchmark in run_ab.sh is what needs the GPU).
-#
-# First run is ~10-15 min for the stock image; the patched image derives from it
-# and should take ~2. Both are cached afterwards, so a rerun is seconds.
+#   bash build.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -22,19 +16,7 @@ command -v docker >/dev/null || {
   exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Verify the patch -- do NOT regenerate it here.
-#
-# This script runs on a compute node, where there is no git repository: the
-# sync deliberately excludes .git/ (~700 MB of an 842 MB checkout, and the
-# remote pushes an already-patched tree so it never needs history). An earlier
-# version called `git diff` here and died with "not a git repository" the first
-# time it ran on the cluster.
-#
-# Both the patch and patch-base.txt ship alongside this script, so these checks
-# normally just pass. They exist so that a patch cut against one base can never
-# be built on top of another -- which is exactly what the pin is for.
-# ---------------------------------------------------------------------------
+# The patch must have been cut from the commit the images build.
 PATCH="$HERE/0001-force-chain-dot-across-scf-if.patch"
 STAMP="$HERE/patch-base.txt"
 echo "=== verifying patch provenance ==="
@@ -55,11 +37,6 @@ if [ "$PATCH_BASE" != "$TRITON_COMMIT" ]; then
 fi
 echo "patch: $(wc -l < "$PATCH") lines, cut from $PATCH_BASE -- matches the pinned commit"
 
-# ---------------------------------------------------------------------------
-# Build. Context is $HERE so the patch COPY resolves; the Dockerfiles pull
-# Triton from GitHub rather than from this tree, so the context stays tiny --
-# EXCEPT for the aiter tarball, which is big and not needed at build time.
-# ---------------------------------------------------------------------------
 echo
 echo "=== [1/2] stock: upstream Triton @ ${TRITON_COMMIT:0:9}, no patch ==="
 time docker build --network=host \
@@ -76,10 +53,7 @@ time docker build --network=host \
   --tag "$PATCHED" \
   "$HERE"
 
-# ---------------------------------------------------------------------------
-# Provenance. Printed every build because the single most expensive mistake
-# available here is measuring two arms that are secretly the same build.
-# ---------------------------------------------------------------------------
+# Provenance: base commit, and which patch (if any) each image contains.
 echo
 echo "=== provenance ==="
 for img in "$STOCK" "$PATCHED"; do
@@ -89,4 +63,4 @@ done
 
 echo
 echo "Built: $STOCK and $PATCHED"
-echo "Next:  bash tools/blasst_ab/run_ab.sh"
+echo "Next:  bash run_ab.sh"

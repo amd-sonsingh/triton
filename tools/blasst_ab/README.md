@@ -1,14 +1,18 @@
-# Reproducing the chain-dot-across-`scf.if` measurement
+# Reproducing the chain-dot-across-`scf.if` performance measurement
 
 Companion to the PR **"[AMD] Allow chain-dot detection across one level of `scf.if`"**
-against `triton-lang/triton`. It lives on its own branch so the PR diff stays at the two
-files it actually changes.
+against `triton-lang/triton`. This branch is the PR plus this directory. It's kept separate
+so the PR diff contains only the files the change touches.
+
+**This covers performance only.** For correctness, use the lit test in the PR: see *How to
+verify* in the PR description. That needs no GPU, no Docker and nothing from this
+directory.
 
 **What is being measured.** The AMD backend's chain-dot detection requires both dots to
-live in the same MLIR region, so a conditional between a QK dot and a P@V dot defeats it and
-`planWarps()` falls back from `warpsPerCTA = [num_warps, 1]` to a generic layout. The patch
-lets the detectors see across exactly one level of `scf.if`, behind
-`TRITON_HIP_FORCE_CHAIN_DOT_ACROSS_IF`.
+live in the same MLIR region. A conditional between a QK dot and a P@V dot therefore defeats
+it, and `planWarps()` falls back from `warpsPerCTA = [num_warps, 1]` to a generic layout. The
+patch lets the detectors see across exactly one level of `scf.if`. Here it is measured on a
+real attention kernel, against unmodified upstream Triton.
 
 Every step below has a **PASS** line. If one does not hold, stop.
 
@@ -18,7 +22,7 @@ Every step below has a **PASS** line. If one does not hold, stop.
 
 | | |
 |---|---|
-| GPU | MI300X or MI355X (`gfx942` / `gfx950`). The block-skip path is not arch-gated, but the numbers below are MI355X. |
+| GPU | MI355X (`gfx950`). All numbers below are from MI355X. MI300X (`gfx942`) should run, since nothing here is arch-gated, but hasn't been tested. |
 | Docker | Required. Runs as a normal user with access to `/dev/kfd`. |
 | Disk | ~40 GB for the two images. |
 | Time | ~20 min, almost all of it compiling Triton once. |
@@ -77,22 +81,29 @@ Two images, both from `triton-lang/triton@b1c34b00c7`:
 | image | Triton |
 |---|---|
 | `triton-blasst-ab:stock` | unmodified upstream — the patch is **absent**, not disabled |
-| `triton-blasst-ab:patched` | `FROM` stock, + `0001-force-chain-dot-across-scf-if.patch` |
+| `triton-blasst-ab:patched` | `FROM` stock, + `0001-force-chain-dot-across-scf-if.patch` (the PR's full diff) |
 
-The patched image derives from the stock one rather than building in parallel, so "the only
-difference is this patch" is a property of the image graph rather than a claim. Each asserts
-its own state at build time: stock fails if the patch helper is present, patched fails if
-the flag string is missing from the built `libtriton.so`.
+The patched image derives from the stock one rather than being built separately. That makes
+"the only difference is this patch" a property of how the images are built, not a claim.
+Each image checks its own state at build time:
 
-Expect ~15 min for stock (Triton from source) and ~1–4 min for patched (incremental
+- **stock** fails if the patch's helper function is in the source.
+- **patched** compiles the PR's new lit case with its own `triton-opt`, and fails unless the
+  branched chain-dot case gets the same layout as the unbranched one. That proves the patch
+  reached the built binary, not just the source.
+
+Expect ~15 min for stock (Triton from source) and a few minutes for patched (incremental
 relink). Watch for these lines:
 
 ```
 verified: stock image has no chain-dot patch
-Applied patch include/triton/Tools/Sys/GetEnv.h cleanly.
+Applied patch test/TritonGPU/amd/accelerate-amd-matmul-chain-dot.mlir cleanly.
 Applied patch third_party/amd/lib/TritonAMDGPUToLLVM/Utility.cpp cleanly.
-rebuild with patch took ~120s (expect ~120s incremental, ~600s full)
-verified: patch present in the built binary (/opt/triton-src/python/triton/_C/libtriton.so)
+verified: patch present in source
+mfma_chain_dot_BM64   (no branch): [4,1] [4,1]
+chain_dot_scf_if_BM64 (branched) : [4,1] [4,1]
+OK: branched case matches the unbranched one
+verified: patch present in the built binary (...)
 ```
 
 **PASS:** `build.sh` exits 0 and prints the provenance block:
@@ -103,41 +114,60 @@ b1c34b00c7f6a6819927577c00a98c0753c1709f
 patched: NONE (stock upstream)
 --- triton-blasst-ab:patched
 b1c34b00c7f6a6819927577c00a98c0753c1709f
-patched: 0001-force-chain-dot-across-scf-if.patch
+patched: 0001-force-chain-dot-across-scf-if.patch sha256=<sha256 of the patch file>
 ```
 
-Both must show the **same commit**; exactly one must say `patched:`.
+Both must show the **same commit**, and exactly one must name the patch. Its `sha256` must
+match `sha256sum 0001-force-chain-dot-across-scf-if.patch`. `run_ab.sh` checks the same
+thing and rebuilds if it doesn't match, so a revised patch can't be measured with an old
+image.
 
 ---
 
 ## 3. Prove the two arms are genuinely different builds
 
 The single most expensive mistake available here is measuring two arms that are secretly the
-same build. `build.sh` already asserts this, but check it independently:
+same build. `build.sh` already asserts this. These checks confirm it independently.
+
+**The patch is the PR.** Run from this directory, on this branch:
+
+```bash
+git diff b1c34b00c7 HEAD -- ':(top,exclude)tools' | diff - 0001-force-chain-dot-across-scf-if.patch && echo "patch == PR diff"
+```
+
+This branch is the PR plus commits that touch only `tools/`, so everything outside `tools/`
+is exactly the PR.
+
+**The binaries differ in behaviour.** Compile the PR's lit test with each image's own
+`triton-opt`:
 
 ```bash
 for img in stock patched; do
-  echo -n "$img source:  "
-  docker run --rm "triton-blasst-ab:$img" sh -c \
-    'grep -c isSameOrAcrossOneIfLevel /opt/triton-src/third_party/amd/lib/TritonAMDGPUToLLVM/Utility.cpp || true'
-  echo -n "$img binary:  "
-  docker run --rm "triton-blasst-ab:$img" sh -c \
-    'grep -aq TRITON_HIP_FORCE_CHAIN_DOT_ACROSS_IF /opt/triton-src/python/triton/_C/libtriton.so \
-       && echo PRESENT || echo ABSENT'
+  echo "--- $img"
+  docker run --rm -v "$PWD/../../test:/t:ro" -v "$PWD:/b:ro" "triton-blasst-ab:$img" sh -c \
+    '$(find /opt/triton-src -name triton-opt -type f -perm -u+x | head -1) \
+       /t/TritonGPU/amd/accelerate-amd-matmul-chain-dot.mlir -split-input-file \
+       --tritonamdgpu-accelerate-matmul="gfx-arch=gfx942 matrix-instruction-size=16" \
+     | python3 /b/check_binary.py'
 done
 ```
 
 **PASS:**
 
 ```
-stock source:   0
-stock binary:   ABSENT
-patched source: 3
-patched binary: PRESENT
+--- stock
+mfma_chain_dot_BM64   (no branch): [4,1] [4,1]
+chain_dot_scf_if_BM64 (branched) : [4,1] [1,4]
+FATAL: the branched case did not get the chain-dot layout, so this triton-opt does not contain the change. ...
+--- patched
+mfma_chain_dot_BM64   (no branch): [4,1] [4,1]
+chain_dot_scf_if_BM64 (branched) : [4,1] [4,1]
+OK: branched case matches the unbranched one
 ```
 
-Checking the **binary** and not only the source matters: an incremental rebuild that
-silently failed to pick up the patch would still show the source change.
+Stock **must** fail here and patched **must** pass. This checks the compiled binaries, not
+the source, so an incremental rebuild that silently didn't pick up the patch can't get
+through.
 
 ---
 
@@ -154,9 +184,7 @@ arguments pass straight through to the benchmark:
 AITER_DIR=/tmp/aiter bash run_ab.sh --shapes 32x8 --seqlens 8192,16384
 ```
 
-Each arm gets its own `TRITON_CACHE_DIR` and `TRITON_DUMP_DIR`. Separate images already make
-cross-contamination impossible; the separation is belt-and-braces because a shared cache has
-produced wrong A/B results before now.
+Each arm gets its own `TRITON_CACHE_DIR` and `TRITON_DUMP_DIR`.
 
 > A wall of `nanobind: leaked ... instances/types/functions` at the end of each arm is
 > normal Triton interpreter-shutdown noise and does not affect the measurement.
@@ -231,32 +259,24 @@ here — see the caveats.
 
 ---
 
-## 6. Optional: verify the patch is inert when disabled
-
-```bash
-INERT_CHECK=1 AITER_DIR=/tmp/aiter bash run_ab.sh
-```
-
-Adds a third arm: the **patched image with the flag unset**. It should match `stock` to
-within noise, confirming the patch costs nothing when off.
-
----
-
 ## Caveats, stated upfront
 
 **The payoff is narrower than the detection.** `isChainDotHead` / `isChainDotTail` are
-purely structural — they ask whether one `tt.dot`'s result feeds another's operand, and
-already fire on any two chained dots in the same region. The patch only extends which region
-boundaries count. But the layout detection unlocks, `[num_warps, 1]`, is tuned for
-flash-attention shapes: it keeps a softmax row inside one warp so the row-reduction needs no
-inter-warp communication. **A chain-dot kernel with no row reduction between the dots gains
-nothing**, and can lose — because the conditional's cost is paid with nothing to offset it.
-That is why the patch is opt-in rather than unconditional.
+purely structural. They ask whether one `tt.dot`'s result feeds another's operand, and they
+already fire on any two chained dots in the same region; the patch only extends which region
+boundaries count. The layout that detection unlocks, `[num_warps, 1]`, is tuned for
+flash-attention shapes. It keeps a softmax row inside one warp, so the row-reduction needs no
+inter-warp communication. **The speedup measured here needs a row-reduction between the
+dots.** A chain-dot kernel without one gains nothing from it. With a branch between its
+dots, it now gets the same layout `main` already picks for the same kernel without the
+branch.
 
-**The baseline is a real baseline.** Both arms could have come from one image by toggling the
-env var — the patch returns false immediately when unset. Two images were built anyway, so
-the comparison is against genuinely unmodified upstream rather than "patched build with the
-patch switched off".
+**It is not a register-spilling effect.** Both arms show zero VGPR spills (5d), and the patch
+is still worth ~1.09×. Spilling would amplify the effect where it occurs, but it isn't
+required.
+
+**The baseline is genuinely unpatched.** The stock image is upstream Triton at the PR's base
+commit, with nothing added.
 
 ---
 
@@ -266,7 +286,8 @@ patch switched off".
 |---|---|
 | `ERROR: ... patch was cut from X but the images pin Y` | `patch-base.txt` disagrees with the pinned commit. Intentional guard — do not override without understanding why they differ. |
 | `no .ttgir found` in the layout check | `TRITON_KERNEL_DUMP=1` did not reach the container; the layout gate cannot run and timings are unverifiable. |
-| `*** NO LAYOUT CHANGED between the arms` | The flag never reached the compiler, or this shape does not discriminate. **Do not record the timings.** |
+| `*** NO LAYOUT CHANGED between the arms` | The patched image doesn't contain the patch (check step 3), or this shape doesn't discriminate. **Do not record the timings.** |
+| `FATAL: the branched case did not get the chain-dot layout` while building `patched` | The patch applied to the source but the incremental rebuild didn't reach `triton-opt`. Rebuild without the Docker cache. |
 | `cmake` build failure in the stock image | `pyproject.toml` at this commit requires `cmake>=3.20,<4.0`; bare `pip install cmake` resolves to 4.x. The Dockerfile pins it. |
 | `assert skip_counter.dtype == ...` | aiter is not at `3fc0ebd66`. The counter dtype changed after that commit and the benchmark and wrapper must come from the same tree. |
 | `ERROR: no /dev/kfd` | Login node, or a GPU-less allocation. |
@@ -279,7 +300,8 @@ patch switched off".
 |---|---|
 | `Dockerfile.stock` | upstream Triton @ `b1c34b00c7`, unpatched |
 | `Dockerfile.patched` | `FROM` stock + the patch, incremental rebuild |
-| `0001-force-chain-dot-across-scf-if.patch` | the change under test, identical to the PR diff |
+| `0001-force-chain-dot-across-scf-if.patch` | the change under test: the PR's full diff (source and lit test), byte for byte |
+| `check_binary.py` | checks the built `triton-opt` carries the patch, by compiling the PR's lit case (step 2, step 3) |
 | `patch-base.txt` | the commit the patch was cut from; `build.sh` refuses to proceed if it disagrees with the pinned commit |
 | `build.sh` | builds both images, prints provenance |
 | `run_ab.sh` | runs both arms, collates |

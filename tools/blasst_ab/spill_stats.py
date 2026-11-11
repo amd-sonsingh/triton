@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """Register pressure per arm, straight from the emitted AMDGCN.
 
-Reported because register pressure is one of the things the chain-dot layout can
-move, and a timing table alone cannot distinguish "the patch helped" from "this
-machine was quieter during the second run".
-
-It is NOT the mechanism behind the measured win, despite an earlier version of
-this file saying so: on the real FA kernel the patch is worth ~1.09x with
-vgpr_spill_count at 0 on both arms. Spilling amplifies the effect where it
-occurs; it is not required for it.
+Spilling would amplify a layout difference, but it is not required for the
+measured win: both arms show zero VGPR spills.
 
     python3 spill_stats.py dump_stock dump_patched
 """
@@ -16,9 +10,8 @@ import os
 import re
 import sys
 
-# AMDGCN carries register/scratch facts in two places: the .amdhsa_kernel
-# directives and the trailing YAML metadata. Read both -- which one is populated
-# has moved between LLVM versions.
+# Read both the .amdhsa_kernel directives and the YAML metadata; which one is
+# populated varies across LLVM versions.
 FIELDS = {
     "vgpr_spill_count": re.compile(r"\.vgpr_spill_count:\s*(\d+)"),
     "sgpr_spill_count": re.compile(r"\.sgpr_spill_count:\s*(\d+)"),
@@ -39,9 +32,7 @@ def stats_for(root):
             row = {}
             for name, rx in FIELDS.items():
                 hits = [int(m) for m in rx.findall(txt)]
-                # One .amdgcn can hold several kernels; the interesting one is
-                # the worst, not the average -- a spilling kernel is not excused
-                # by a non-spilling neighbour in the same file.
+                # Several kernels per file: report the worst.
                 row[name] = max(hits) if hits else None
             row["scratch_ops"] = len(SCRATCH_OP.findall(txt))
             out[f] = row
