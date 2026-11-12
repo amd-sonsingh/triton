@@ -57,9 +57,8 @@ def main(stock_dir, patched_dir):
         return 0
 
     print("*** NO LAYOUT CHANGED between the arms. ***")
-    print("Either the env var never reached the compiler, or this shape does not")
-    print("discriminate, or the patch did not apply. The timings mean nothing")
-    print("until that is resolved -- do not record them.")
+    print("Either the patched image lacks the patch (see README step 3) or this")
+    print("shape does not discriminate. Do not record the timings.")
     return 1
 
 
